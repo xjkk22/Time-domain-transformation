@@ -1,5 +1,11 @@
+import argparse
+import sys
+
 import pandas as pd
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy.signal import czt, get_window, savgol_filter
@@ -15,16 +21,16 @@ plt.rcParams['axes.unicode_minus'] = False
 # 1. 基础函数
 # ==========================================
 def load_data(filename):
-    try:
-        df = pd.read_csv(filename)
-        freqs = df['Freq(MHz)'].values * 1e6
-        mag_db = df['ReflectRatio(dB)'].values
-        mag_linear = 10 ** (mag_db / 20.0)
-        s_params = mag_linear * (1 + 0j)  # 假设相位为0
-        return freqs, s_params, mag_db
-    except Exception as e:
-        print(f"读取文件出错: {e}")
-        return None, None, None
+    df = pd.read_csv(filename)
+    freqs = df["Freq(MHz)"].to_numpy(dtype=float) * 1e6
+    mag_db = df["ReflectRatio(dB)"].to_numpy(dtype=float)
+    if len(freqs) < 2 or not np.isfinite(freqs).all() or not np.isfinite(mag_db).all():
+        raise ValueError("CSV 至少需要两行有效数值，频率和反射率必须为有限值。")
+    steps = np.diff(freqs)
+    if (steps <= 0).any() or not np.allclose(steps, steps[0], rtol=1e-6, atol=2):
+        raise ValueError("ICZT 要求频率按升序等间隔采样。")
+    mag_linear = 10 ** (mag_db / 20.0)
+    return freqs, mag_linear.astype(complex), mag_db  # 假设相位为 0
 
 
 def freq_to_time_iczt(S_params, freqs, t_start, t_stop, num_points):
@@ -109,135 +115,174 @@ def smooth_final_curve(y, window_points=121, polyorder=3):
     if window_points <= polyorder + 2:
         return y
     window_points = min(window_points, len(y) if len(y) % 2 == 1 else len(y) - 1)
+    if window_points <= polyorder + 2:
+        return y
     return savgol_filter(y, window_points, polyorder, mode="interp")
 
 
 # ==========================================
 # 3. 主程序
 # ==========================================
-if __name__ == "__main__":
-    filename = r"RL_Meas20260616\RL_Meas\s5.csv"
+TIME_START_NS, TIME_STOP_NS = -5.0, 5.0
+WINDOWS = {"soft": "软时间窗", "hann": "汉宁窗", "boxcar": "矩形窗",
+           "hamming": "汉明窗", "blackman": "布莱克曼窗"}
+
+
+def process_file(filename, window, gate_start_ns, gate_stop_ns):
+    if not TIME_START_NS <= gate_start_ns < gate_stop_ns <= TIME_STOP_NS:
+        raise ValueError("窗范围必须满足 -5 ≤ 起点 < 终点 ≤ 5（ns）。")
+
     freqs, s_params, mag_db_raw = load_data(filename)
+    t_axis, td_data = freq_to_time_iczt(
+        s_params, freqs, TIME_START_NS * 1e-9, TIME_STOP_NS * 1e-9, 2500
+    )
+    gate_start, gate_stop = gate_start_ns * 1e-9, gate_stop_ns * 1e-9
+    inside = (t_axis >= gate_start) & (t_axis <= gate_stop)
+    gate_points = np.count_nonzero(inside)
+    if gate_points < (1 if window == "boxcar" else 3):
+        raise ValueError("窗范围内的时域采样点不足，请扩大范围。")
 
-    if freqs is not None:
-        # --- 步骤 A: 变换到时域 ---
-        # 根据要求：起始 -5ns，终止 20ns
-        T_START, T_STOP = -5e-9, 5e-9
-        num_points = 2500
-        t_axis, td_data = freq_to_time_iczt(s_params, freqs, T_START, T_STOP, num_points)
+    if window == "soft":
+        td_gated, gate_mask = apply_dual_time_gate(t_axis, td_data, gate_start, gate_stop, 0.20e-9)
+    else:
+        gate_mask = np.zeros_like(t_axis)
+        gate_mask[inside] = get_window(window, gate_points, fftbins=False)
+        td_gated = td_data * gate_mask
 
-        # --- 步骤 B: 应用双边时域门 ---
-        # 时域门范围修改
-        # 窗口太窄会过度平滑并拉偏趋势；适当放宽后更贴合原曲线包络
-        GATE_START, GATE_STOP = -0.1e-9, 0.1e-9
-        TAPER_TIME = 0.20e-9
-        RAW_BLEND = 0.5
-        BASELINE_CORRECTION_WINDOW = 501
-        FINAL_SMOOTH_WINDOW = 121
-        td_gated, gate_mask = apply_dual_time_gate(t_axis, td_data, GATE_START, GATE_STOP, TAPER_TIME)
+    RAW_BLEND = 0.5
+    BASELINE_CORRECTION_WINDOW = 501
+    FINAL_SMOOTH_WINDOW = 121
 
-        # --- 步骤 C: 反变换回频域 ---
-        s_smooth_complex = time_to_freq_dft(td_gated, t_axis, freqs)
+    # --- 步骤 C: 反变换回频域 ---
+    s_smooth_complex = time_to_freq_dft(td_gated, t_axis, freqs)
 
-        # 频域校准与 dB 计算
-        mag_smooth_linear = np.abs(s_smooth_complex)
-        mag_gate_db = 20 * np.log10(mag_smooth_linear + 1e-12)
+    # 频域校准与 dB 计算
+    mag_smooth_linear = np.abs(s_smooth_complex)
+    mag_gate_db = 20 * np.log10(mag_smooth_linear + 1e-12)
 
-        # 用 dB 中位数做整体校准，比线性均值缩放更不容易被尖峰拉偏
-        offset_db = np.median(mag_db_raw - mag_gate_db)
-        mag_gate_db = mag_gate_db + offset_db
+    # 用 dB 中位数做整体校准，比线性均值缩放更不容易被尖峰拉偏
+    offset_db = np.median(mag_db_raw - mag_gate_db)
+    mag_gate_db = mag_gate_db + offset_db
 
-        # 校正门控后随频率缓慢变化的基线偏移，避免高频端整体向下
-        baseline_error_db = smooth_trend(mag_db_raw - mag_gate_db, BASELINE_CORRECTION_WINDOW)
-        mag_gate_db = mag_gate_db + baseline_error_db
+    # 校正门控后随频率缓慢变化的基线偏移，避免高频端整体向下
+    baseline_error_db = smooth_trend(mag_db_raw - mag_gate_db, BASELINE_CORRECTION_WINDOW)
+    mag_gate_db = mag_gate_db + baseline_error_db
 
-        # 保留一部分原始曲线趋势，避免时域门控后的结果过度失真
-        mag_smooth_db = RAW_BLEND * mag_db_raw + (1 - RAW_BLEND) * mag_gate_db
-        mag_smooth_db = smooth_final_curve(mag_smooth_db, FINAL_SMOOTH_WINDOW)
+    # 保留一部分原始曲线趋势，避免时域门控后的结果过度失真
+    mag_smooth_db = RAW_BLEND * mag_db_raw + (1 - RAW_BLEND) * mag_gate_db
+    mag_smooth_db = smooth_final_curve(mag_smooth_db, FINAL_SMOOTH_WINDOW)
 
-        # 导出去噪后的频域曲线数据
-        output_filename = f'{filename}_denoised.csv'
-        output_df = pd.DataFrame({
-            "Freq(MHz)": freqs / 1e6,
-            "Raw ReflectRatio(dB)": mag_db_raw,
-            "Denoised ReflectRatio(dB)": mag_smooth_db,
-            "Denoised-Raw(dB)": mag_smooth_db - mag_db_raw,
-        })
-        output_df.to_csv(output_filename, index=False, encoding="utf-8-sig")
-        print(f"去噪后的曲线数据已导出: {output_filename}")
+    # --- 时域 dB 转换与归一化 ---
+    td_abs = np.abs(td_data)
+    td_abs_gated = np.abs(td_gated)
 
-        # --- 时域 dB 转换与归一化 ---
-        td_abs = np.abs(td_data)
-        td_abs_gated = np.abs(td_gated)
+    td_db_raw = 20 * np.log10(td_abs + 1e-12)
+    td_db_gated = 20 * np.log10(td_abs_gated + 1e-12)
 
-        td_db_raw = 20 * np.log10(td_abs + 1e-12)
-        td_db_gated = 20 * np.log10(td_abs_gated + 1e-12)
+    # 以主峰为 0dB 基准
+    ref_max = np.max(td_db_raw)
+    td_db_raw -= ref_max
+    td_db_gated -= ref_max
 
-        # 以主峰为 0dB 基准
-        ref_max = np.max(td_db_raw)
-        td_db_raw -= ref_max
-        td_db_gated -= ref_max
+    # 修正显示下限
+    td_db_gated[td_db_gated < -100] = -100
 
-        # 修正显示下限
-        td_db_gated[td_db_gated < -100] = -100
+    # ==========================================
+    # 4. 绘图展示
+    # ==========================================
+    fig, axes = plt.subplots(3, 1, figsize=(10, 13), constrained_layout=True)
 
-        # ==========================================
-        # 4. 绘图展示
-        # ==========================================
-        fig, axes = plt.subplots(3, 1, figsize=(10, 13), constrained_layout=True)
+    # 图 1: 原始频域
+    axes[0].plot(freqs / 1e6, mag_db_raw, color='royalblue', linewidth=1, alpha=0.7, label='原始测量数据')
+    axes[0].set_title('(1) 原始频域反射率：包含环境干扰引起的剧烈波动', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('反射率 (dB)')
+    axes[0].grid(True, linestyle=':', alpha=0.6)
+    axes[0].legend(loc='upper right')
 
-        # 图 1: 原始频域
-        axes[0].plot(freqs / 1e6, mag_db_raw, color='royalblue', linewidth=1, alpha=0.7, label='原始测量数据')
-        axes[0].set_title('(1) 原始频域反射率：包含环境干扰引起的剧烈波动', fontsize=12, fontweight='bold')
-        axes[0].set_ylabel('反射率 (dB)')
-        axes[0].grid(True, linestyle=':', alpha=0.6)
-        axes[0].legend(loc='upper right')
+    # 图 2: 时域 dB 图
+    ax2 = axes[1]
+    ax2.plot(t_axis * 1e9, td_db_raw, color='darkgray', linewidth=1, alpha=0.6, label='原始时域响应')
+    ax2.plot(t_axis * 1e9, td_db_gated, 'r-', linewidth=1.5, label='加窗后信号')
 
-        # 图 2: 时域 dB 图 (满足要求 1, 2, 3)
-        ax2 = axes[1]
-        ax2.plot(t_axis * 1e9, td_db_raw, color='darkgray', linewidth=1, alpha=0.6, label='原始时域响应')
-        ax2.plot(t_axis * 1e9, td_db_gated, 'r-', linewidth=1.5, label='加窗后信号')
+    # 突出显示加窗范围
+    gate_label = f"{WINDOWS[window]} [{gate_start_ns:g}, {gate_stop_ns:g}] ns"
+    if window == "soft":
+        gate_label += "，单侧过渡 0.20 ns"
+    ax2.fill_between(t_axis * 1e9, -100, 10, where=(gate_mask > 0),
+                     color='green', alpha=0.1, label=gate_label)
 
-        # 突出显示加窗范围
-        gate_label = f"软时间窗 [{GATE_START * 1e9:.2f}, {GATE_STOP * 1e9:.2f}]ns，过渡边 {TAPER_TIME * 1e9:.2f}ns"
-        ax2.fill_between(t_axis * 1e9, -100, 10, where=(gate_mask > 0),
-                         color='green', alpha=0.1, label=gate_label)
+    ax2.set_title(f'(2) 时域脉冲响应 (dB)：显示范围 {TIME_START_NS:.0f}ns 至 {TIME_STOP_NS:.0f}ns',
+                  fontsize=12, fontweight='bold')
+    ax2.set_xlabel('时间 (ns)')
+    ax2.set_ylabel('相对幅度 (dB)')
+    ax2.set_xlim(TIME_START_NS, TIME_STOP_NS)  # 横轴范围从 -5ns 开始
+    ax2.set_ylim(-80, 5)
+    ax2.grid(True, linestyle=':', alpha=0.6)
+    ax2.legend(loc='upper right')
 
-        ax2.set_title(f'(2) 时域脉冲响应 (dB)：显示范围 {T_START * 1e9:.0f}ns 至 {T_STOP * 1e9:.0f}ns',
+    # 图 3: 最终去噪结果对比
+    axes[2].plot(freqs / 1e6, mag_db_raw, color='lightblue', linewidth=1, alpha=0.5, label='Raw (含干扰)')
+    axes[2].plot(freqs / 1e6, mag_smooth_db, color='crimson', linewidth=2, label='Gated (去噪后)')
+
+    axes[2].set_title('(3) 最终反射率曲线',
                       fontsize=12, fontweight='bold')
-        ax2.set_xlabel('时间 (ns)')
-        ax2.set_ylabel('相对幅度 (dB)')
-        ax2.set_xlim(T_START * 1e9, T_STOP * 1e9)  # 横轴范围从 -5ns 开始
-        ax2.set_ylim(-80, 5)
-        ax2.grid(True, linestyle=':', alpha=0.6)
-        ax2.legend(loc='upper right')
-
-        # 图 3: 最终去噪结果对比
-        axes[2].plot(freqs / 1e6, mag_db_raw, color='lightblue', linewidth=1, alpha=0.5, label='Raw (含干扰)')
-        axes[2].plot(freqs / 1e6, mag_smooth_db, color='crimson', linewidth=2, label='Gated (去噪后)')
-
-        axes[2].set_title(f'(3) 最终反射率曲线)',
-                          fontsize=12, fontweight='bold')
-        axes[2].set_xlabel('频率 (MHz)')
-        axes[2].set_ylabel('反射率 (dB)')
-        axes[2].grid(True, linestyle=':', alpha=0.6)
-        axes[2].legend(loc='upper right')
+    axes[2].set_xlabel('频率 (MHz)')
+    axes[2].set_ylabel('反射率 (dB)')
+    axes[2].grid(True, linestyle=':', alpha=0.6)
+    axes[2].legend(loc='upper right')
 
 
-
-        # 单独输出一张只包含去噪后曲线的图片
-
-
-        denoised_curve_image = Path(filename).with_suffix("").name + "_denoised_compare.png"
-        fig_denoised, ax_denoised = plt.subplots(1, 1, figsize=(10, 5), constrained_layout=True)
-        ax_denoised.plot(freqs / 1e6, mag_db_raw, color='lightblue', linewidth=1, alpha=0.55, label='Raw (含干扰)')
-        ax_denoised.plot(freqs / 1e6, mag_smooth_db, color='crimson', linewidth=2, label='Denoised (去噪后)')
-        ax_denoised.set_title('原始曲线与去噪后曲线对比', fontsize=13, fontweight='bold')
-        ax_denoised.set_xlabel('频率 (MHz)')
-        ax_denoised.set_ylabel('反射率 (dB)')
-        ax_denoised.grid(True, linestyle=':', alpha=0.6)
-        ax_denoised.legend(loc='upper right')
+    overview_image = filename.with_name(f"{filename.stem}_overview.png")
+    denoised_curve_image = filename.with_name(f"{filename.stem}_denoised_compare.png")
+    fig_denoised, ax_denoised = plt.subplots(1, 1, figsize=(10, 5), constrained_layout=True)
+    ax_denoised.plot(freqs / 1e6, mag_db_raw, color='lightblue', linewidth=1, alpha=0.55, label='Raw (含干扰)')
+    ax_denoised.plot(freqs / 1e6, mag_smooth_db, color='crimson', linewidth=2, label='Denoised (去噪后)')
+    ax_denoised.set_title('原始曲线与去噪后曲线对比', fontsize=13, fontweight='bold')
+    ax_denoised.set_xlabel('频率 (MHz)')
+    ax_denoised.set_ylabel('反射率 (dB)')
+    ax_denoised.grid(True, linestyle=':', alpha=0.6)
+    ax_denoised.legend(loc='upper right')
+    try:
+        fig.savefig(overview_image, dpi=300)
         fig_denoised.savefig(denoised_curve_image, dpi=300)
-        print(f"原始/去噪曲线对比图片已导出: {denoised_curve_image}")
+    finally:
+        plt.close(fig)
+        plt.close(fig_denoised)
+    return overview_image, denoised_curve_image
 
-        plt.show()
+
+def main():
+    parser = argparse.ArgumentParser(description="Chirp-Z 时域门控去噪并保存两张 PNG 图片")
+    parser.add_argument("filename", type=Path, help="输入 CSV 路径")
+    parser.add_argument("--window", choices=WINDOWS, default="soft", help="窗类型，默认 soft")
+    parser.add_argument("--range", dest="gate_range", type=float, nargs=2,
+                        metavar=("START_NS", "STOP_NS"), default=(-0.1, 0.1),
+                        help="窗起点与终点（ns），默认 -0.1 0.1")
+    interactive = len(sys.argv) == 1
+    try:
+        if interactive:
+            filename = Path(input("请输入 CSV 文件名或路径：").strip().strip('"'))
+            print("  ".join(f"{key} = {name}" for key, name in WINDOWS.items()))
+            window = input("窗类型 [soft]：").strip().lower() or "soft"
+            if window not in WINDOWS:
+                raise ValueError("请选择列表中的窗类型。")
+            start = float(input("窗起点（ns）[-0.1]：").strip() or "-0.1")
+            stop = float(input("窗终点（ns）[0.1]：").strip() or "0.1")
+        else:
+            args = parser.parse_args()
+            filename, window = args.filename, args.window
+            start, stop = args.gate_range
+
+        for image_path in process_file(filename.resolve(), window, start, stop):
+            print(f"已保存 {image_path}")
+        return 0
+    except (OSError, ValueError, KeyError, EOFError) as exc:
+        print(f"处理失败：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        if interactive and sys.stdin.isatty():
+            input("按 Enter 退出。")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
