@@ -131,20 +131,34 @@ WINDOWS = {"soft": "软时间窗", "hann": "汉宁窗", "boxcar": "矩形窗",
 DEFAULT_GATE_NS = (-0.1, 0.1)
 
 
-def process_file(filename, window, gate_range=None, interactive=False):
+def load_time_response(filename):
     freqs, s_params, mag_db_raw = load_data(filename)
     t_axis, td_data = freq_to_time_iczt(
         s_params, freqs, TIME_START_NS * 1e-9, TIME_STOP_NS * 1e-9, 2500
     )
+    return freqs, mag_db_raw, t_axis, td_data
+
+
+def suggest_range(t_axis, td_data):
+    # 靠近时域边界时整体平移，以保留默认窗宽。
+    peak_ns = t_axis[np.argmax(np.abs(td_data))] * 1e9
+    width_ns = DEFAULT_GATE_NS[1] - DEFAULT_GATE_NS[0]
+    start = round(float(np.clip(
+        peak_ns - width_ns / 2, TIME_START_NS, TIME_STOP_NS - width_ns
+    )), 3)
+    return peak_ns, (start, round(start + width_ns, 3))
+
+
+def inspect_range(filename):
+    _, _, t_axis, td_data = load_time_response(filename)
+    return suggest_range(t_axis, td_data)
+
+
+def process_file(filename, window, gate_range=None, interactive=False):
+    freqs, mag_db_raw, t_axis, td_data = load_time_response(filename)
     if gate_range is None:
-        # 沿用默认窗宽，靠近时域边界时整体平移以保留宽度。
-        peak_ns = t_axis[np.argmax(np.abs(td_data))] * 1e9
-        width_ns = DEFAULT_GATE_NS[1] - DEFAULT_GATE_NS[0]
-        suggested_start = round(float(np.clip(
-            peak_ns - width_ns / 2, TIME_START_NS, TIME_STOP_NS - width_ns
-        )), 3)
-        suggested_stop = round(suggested_start + width_ns, 3)
-        gate_range = (suggested_start, suggested_stop)
+        peak_ns, gate_range = suggest_range(t_axis, td_data)
+        suggested_start, suggested_stop = gate_range
         print(f"可用时间范围 [{TIME_START_NS:g}, {TIME_STOP_NS:g}] ns，"
               f"采样间隔约 {(t_axis[1] - t_axis[0]) * 1e9:.4f} ns。")
         print(f"时域主峰 {peak_ns:.3f} ns，建议起始范围 [{suggested_start:g}, {suggested_stop:g}] ns。")
@@ -277,7 +291,14 @@ def process_file(filename, window, gate_range=None, interactive=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Chirp-Z 时域门控去噪并保存两张 PNG 图片")
+    if sys.argv[1:] == ["--gui"] or (len(sys.argv) == 1 and sys.stdin is None):
+        from chirpz_gui import launch
+
+        launch(process_file, inspect_range, WINDOWS, DEFAULT_GATE_NS, (TIME_START_NS, TIME_STOP_NS))
+        return 0
+
+    parser = argparse.ArgumentParser(description="Chirp-Z 时域门控去噪并保存两张 PNG 图片",
+                                     epilog="使用 --gui 打开图形界面。")
     parser.add_argument("filename", type=Path, help="输入 CSV 路径")
     parser.add_argument("--window", choices=WINDOWS, default="soft", help="窗类型，默认 soft")
     ranges = parser.add_mutually_exclusive_group()

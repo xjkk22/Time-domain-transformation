@@ -1,6 +1,14 @@
 # Chirp-Z 时域门控工具使用说明
 
-## 双击运行
+## 图形界面
+
+在 64 位 Windows 上双击 `dist/ChirpZ-GUI.exe`，无需安装 Python。
+
+1. 点击 **浏览…** 选择 CSV，也可直接输入路径。
+2. 从下拉框选择窗类型，填写起止时间。点击 **填入建议范围** 可根据当前 CSV 计算时域主峰并填入建议值，填入后仍可手动调整。
+3. 点击 **处理**，在 **处理总览** 和 **去噪对比** 标签页查看两张图。程序会自动保存到 CSV 所在目录。点击 **另存图片…** 可将两张 PNG 复制到其他目录。
+
+## 命令行交互模式
 
 在 64 位 Windows 上打开 `dist/ChirpZ-v2.exe`，根据提示输入 CSV 文件名或完整路径，再输入窗类型并选择时间范围。路径包含空格时，可在交互提示中直接粘贴完整路径。输入相对路径时，程序从当前工作目录查找文件。窗类型直接回车可使用软时间窗。
 
@@ -53,4 +61,11 @@ python -m venv .build-env
 .\.build-env\Scripts\python.exe -m pip install numpy scipy pandas matplotlib pyinstaller
 .\.build-env\Scripts\python.exe "Chirp_Z逆变换_实例.py" "D:\测量数据\s5.csv" --window hann --range -0.2 0.2
 .\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --name ChirpZ-v2 --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
+```
+
+图形界面也可从源码启动，或单独重新打包。
+
+```powershell
+.\.build-env\Scripts\python.exe "Chirp_Z逆变换_实例.py" --gui
+.\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name ChirpZ-GUI --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
 ```
