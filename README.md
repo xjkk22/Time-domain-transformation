@@ -1,0 +1,48 @@
+[Uploading Chirp-Z工具使用说明.md…]()
+# Chirp-Z 时域门控工具使用说明
+
+## 双击运行
+
+在 64 位 Windows 上打开 `dist/ChirpZ.exe`，根据提示输入 CSV 文件名或完整路径，再输入窗类型、起点和终点。路径包含空格时，可在交互提示中直接粘贴完整路径。输入相对路径时，程序从当前工作目录查找文件。窗参数直接回车可使用默认值。
+
+CSV 首行需包含 `Freq(MHz)` 和 `ReflectRatio(dB)` 两列。至少提供两行有效数据，频率按升序等间隔排列。算法沿用原脚本的零相位假设。
+
+| 输入值 | 窗类型 | 范围含义 |
+| --- | --- | --- |
+| `soft` | 原脚本的软时间窗（默认） | 指定权重为 1 的区间，两侧各有 0.20 ns 的余弦过渡，过渡受时域边界限制 |
+| `hann` | 汉宁窗 | 在指定区间内应用对称汉宁窗 |
+| `boxcar` | 矩形窗 | 指定区间内权重为 1 |
+| `hamming` | 汉明窗 | 在指定区间内应用对称汉明窗 |
+| `blackman` | 布莱克曼窗 | 在指定区间内应用对称布莱克曼窗 |
+
+窗的起止值以纳秒（ns）为单位，默认是 −0.1 和 0.1，必须满足 −5 ≤ 起点 < 终点 ≤ 5。窗口过窄、容纳的时域采样点不足时，程序会提示扩大范围。
+
+## PowerShell 命令示例
+
+在项目目录中运行以下命令，将路径替换为实际 CSV 文件路径。
+
+```powershell
+.\dist\ChirpZ.exe "D:\测量数据\s5.csv" --window hann --range -0.2 0.2
+.\dist\ChirpZ.exe "D:\测量数据\s5.csv" --window boxcar --range -0.1 0.15
+.\dist\ChirpZ.exe --help
+```
+
+## 自动输出
+
+程序会把两张 300 DPI PNG 保存到输入 CSV 所在目录。例如，输入 `s5.csv` 时生成：
+
+- `s5_overview.png`，包含原始频域、时域门控和最终频域对比三个子图。
+- `s5_denoised_compare.png`，包含原始与去噪后频域曲线的单独对比图。
+
+对同一输入重复运行会覆盖这两张图。请确保输入文件所在目录可写。
+
+## 从源码运行或重新打包
+
+在 Windows 上打开 PowerShell，进入项目目录后执行以下命令。生成的单文件 EXE 位于 `dist/ChirpZ.exe`。
+
+```powershell
+python -m venv .build-env
+.\.build-env\Scripts\python.exe -m pip install numpy scipy pandas matplotlib pyinstaller
+.\.build-env\Scripts\python.exe "Chirp_Z逆变换_实例.py" "D:\测量数据\s5.csv" --window hann --range -0.2 0.2
+.\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --name ChirpZ --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
+```
