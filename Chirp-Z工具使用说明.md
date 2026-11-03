@@ -2,7 +2,7 @@
 
 ## 双击运行
 
-在 64 位 Windows 上打开 `dist/ChirpZ.exe`，根据提示输入 CSV 文件名或完整路径，再输入窗类型、起点和终点。路径包含空格时，可在交互提示中直接粘贴完整路径。输入相对路径时，程序从当前工作目录查找文件。窗参数直接回车可使用默认值。
+在 64 位 Windows 上打开 `dist/ChirpZ-v2.exe`，根据提示输入 CSV 文件名或完整路径，再输入窗类型并选择时间范围。路径包含空格时，可在交互提示中直接粘贴完整路径。输入相对路径时，程序从当前工作目录查找文件。窗类型直接回车可使用软时间窗。
 
 CSV 首行需包含 `Freq(MHz)` 和 `ReflectRatio(dB)` 两列。至少提供两行有效数据，频率按升序等间隔排列。算法沿用原脚本的零相位假设。
 
@@ -14,17 +14,26 @@ CSV 首行需包含 `Freq(MHz)` 和 `ReflectRatio(dB)` 两列。至少提供两�
 | `hamming` | 汉明窗 | 在指定区间内应用对称汉明窗 |
 | `blackman` | 布莱克曼窗 | 在指定区间内应用对称布莱克曼窗 |
 
-窗的起止值以纳秒（ns）为单位，默认是 −0.1 和 0.1，必须满足 −5 ≤ 起点 < 终点 ≤ 5。窗口过窄、容纳的时域采样点不足时，程序会提示扩大范围。
+选好窗类型后，程序会显示可用时间范围、采样间隔和当前数据的时域主峰。可选择：
+
+1. **建议范围**（直接回车）。以时域主峰为中心取约 0.20 ns 宽的窗口，靠近边界时平移到可用范围内。适合作为试算起点，再根据输出总览图调整。由于输入只含幅度，零相位假设通常会让主峰出现在 0 ns 附近。主峰位置仅用于选窗参考。
+2. **手动输入**。输入起点和终点，可用于保留指定的时域响应。
+3. **原默认范围**。使用 −0.1 至 0.1 ns。
+
+窗的起止值以纳秒（ns）为单位，必须满足 −5 ≤ 起点 < 终点 ≤ 5。窗口过窄、容纳的时域采样点不足时，程序会提示扩大范围。
 
 ## PowerShell 命令示例
 
 在项目目录中运行以下命令，将路径替换为实际 CSV 文件路径。
 
 ```powershell
-.\dist\ChirpZ.exe "D:\测量数据\s5.csv" --window hann --range -0.2 0.2
-.\dist\ChirpZ.exe "D:\测量数据\s5.csv" --window boxcar --range -0.1 0.15
-.\dist\ChirpZ.exe --help
+.\dist\ChirpZ-v2.exe "D:\测量数据\s5.csv" --window hann --range -0.2 0.2
+.\dist\ChirpZ-v2.exe "D:\测量数据\s5.csv" --window boxcar --range -0.1 0.15
+.\dist\ChirpZ-v2.exe "D:\测量数据\s5.csv" --window hann --auto-range
+.\dist\ChirpZ-v2.exe --help
 ```
+
+命令行省略范围参数时使用原默认范围。
 
 ## 自动输出
 
@@ -37,11 +46,11 @@ CSV 首行需包含 `Freq(MHz)` 和 `ReflectRatio(dB)` 两列。至少提供两�
 
 ## 从源码运行或重新打包
 
-在 Windows 上打开 PowerShell，进入项目目录后执行以下命令。生成的单文件 EXE 位于 `dist/ChirpZ.exe`。
+在 Windows 上打开 PowerShell，进入项目目录后执行以下命令。生成的单文件 EXE 位于 `dist/ChirpZ-v2.exe`。
 
 ```powershell
 python -m venv .build-env
 .\.build-env\Scripts\python.exe -m pip install numpy scipy pandas matplotlib pyinstaller
 .\.build-env\Scripts\python.exe "Chirp_Z逆变换_实例.py" "D:\测量数据\s5.csv" --window hann --range -0.2 0.2
-.\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --name ChirpZ --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
+.\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --name ChirpZ-v2 --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
 ```

@@ -128,14 +128,39 @@ WINDOWS = {"soft": "软时间窗", "hann": "汉宁窗", "boxcar": "矩形窗",
            "hamming": "汉明窗", "blackman": "布莱克曼窗"}
 
 
-def process_file(filename, window, gate_start_ns, gate_stop_ns):
-    if not TIME_START_NS <= gate_start_ns < gate_stop_ns <= TIME_STOP_NS:
-        raise ValueError("窗范围必须满足 -5 ≤ 起点 < 终点 ≤ 5（ns）。")
+DEFAULT_GATE_NS = (-0.1, 0.1)
 
+
+def process_file(filename, window, gate_range=None, interactive=False):
     freqs, s_params, mag_db_raw = load_data(filename)
     t_axis, td_data = freq_to_time_iczt(
         s_params, freqs, TIME_START_NS * 1e-9, TIME_STOP_NS * 1e-9, 2500
     )
+    if gate_range is None:
+        # 沿用默认窗宽，靠近时域边界时整体平移以保留宽度。
+        peak_ns = t_axis[np.argmax(np.abs(td_data))] * 1e9
+        width_ns = DEFAULT_GATE_NS[1] - DEFAULT_GATE_NS[0]
+        suggested_start = round(float(np.clip(
+            peak_ns - width_ns / 2, TIME_START_NS, TIME_STOP_NS - width_ns
+        )), 3)
+        suggested_stop = round(suggested_start + width_ns, 3)
+        gate_range = (suggested_start, suggested_stop)
+        print(f"可用时间范围 [{TIME_START_NS:g}, {TIME_STOP_NS:g}] ns，"
+              f"采样间隔约 {(t_axis[1] - t_axis[0]) * 1e9:.4f} ns。")
+        print(f"时域主峰 {peak_ns:.3f} ns，建议起始范围 [{suggested_start:g}, {suggested_stop:g}] ns。")
+        if interactive:
+            choice = input("选择范围方式 [1] 建议范围 / 2 手动输入 / 3 原默认范围：").strip() or "1"
+            if choice == "2":
+                gate_range = (float(input("窗起点（ns）：")), float(input("窗终点（ns）：")))
+            elif choice == "3":
+                gate_range = DEFAULT_GATE_NS
+            elif choice != "1":
+                raise ValueError("请选择 1、2 或 3。")
+
+    gate_start_ns, gate_stop_ns = gate_range
+    if not TIME_START_NS <= gate_start_ns < gate_stop_ns <= TIME_STOP_NS:
+        raise ValueError("窗范围必须满足 -5 ≤ 起点 < 终点 ≤ 5（ns）。")
+
     gate_start, gate_stop = gate_start_ns * 1e-9, gate_stop_ns * 1e-9
     inside = (t_axis >= gate_start) & (t_axis <= gate_stop)
     gate_points = np.count_nonzero(inside)
@@ -255,9 +280,11 @@ def main():
     parser = argparse.ArgumentParser(description="Chirp-Z 时域门控去噪并保存两张 PNG 图片")
     parser.add_argument("filename", type=Path, help="输入 CSV 路径")
     parser.add_argument("--window", choices=WINDOWS, default="soft", help="窗类型，默认 soft")
-    parser.add_argument("--range", dest="gate_range", type=float, nargs=2,
-                        metavar=("START_NS", "STOP_NS"), default=(-0.1, 0.1),
+    ranges = parser.add_mutually_exclusive_group()
+    ranges.add_argument("--range", dest="gate_range", type=float, nargs=2,
+                        metavar=("START_NS", "STOP_NS"),
                         help="窗起点与终点（ns），默认 -0.1 0.1")
+    ranges.add_argument("--auto-range", action="store_true", help="围绕数据的时域主峰自动选窗")
     interactive = len(sys.argv) == 1
     try:
         if interactive:
@@ -266,14 +293,13 @@ def main():
             window = input("窗类型 [soft]：").strip().lower() or "soft"
             if window not in WINDOWS:
                 raise ValueError("请选择列表中的窗类型。")
-            start = float(input("窗起点（ns）[-0.1]：").strip() or "-0.1")
-            stop = float(input("窗终点（ns）[0.1]：").strip() or "0.1")
+            gate_range = None
         else:
             args = parser.parse_args()
             filename, window = args.filename, args.window
-            start, stop = args.gate_range
+            gate_range = None if args.auto_range else args.gate_range or DEFAULT_GATE_NS
 
-        for image_path in process_file(filename.resolve(), window, start, stop):
+        for image_path in process_file(filename.resolve(), window, gate_range, interactive):
             print(f"已保存 {image_path}")
         return 0
     except (OSError, ValueError, KeyError, EOFError) as exc:
