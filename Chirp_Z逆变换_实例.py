@@ -8,6 +8,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from scipy.signal import czt, get_window, savgol_filter
 
 # ==========================================
@@ -154,7 +155,12 @@ def inspect_range(filename):
     return suggest_range(t_axis, td_data)
 
 
-def process_file(filename, window, gate_range=None, interactive=False):
+def process_file(filename, window, gate_range=None, interactive=False, *, csv_path=None):
+    if csv_path is not None:
+        if csv_path.resolve() == filename.resolve():
+            raise ValueError("导出路径与输入 CSV 相同，请选择其他目录。")
+        if not csv_path.parent.is_dir():
+            raise ValueError("CSV 导出目录不存在，请选择有效的文件夹。")
     freqs, mag_db_raw, t_axis, td_data = load_time_response(filename)
     if gate_range is None:
         peak_ns, gate_range = suggest_range(t_axis, td_data)
@@ -287,6 +293,16 @@ def process_file(filename, window, gate_range=None, interactive=False):
     finally:
         plt.close(fig)
         plt.close(fig_denoised)
+    if csv_path is not None:
+        # 先写入同目录的临时文件，写完后再替换目标文件。
+        data = pd.DataFrame({"Freq(MHz)": freqs / 1e6, "ReflectRatio(dB)": mag_smooth_db})
+        with NamedTemporaryFile(dir=csv_path.parent, delete=False) as temp:
+            temp_path = Path(temp.name)
+        try:
+            data.to_csv(temp_path, index=False, encoding="utf-8-sig")
+            temp_path.replace(csv_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
     return overview_image, denoised_curve_image
 
 

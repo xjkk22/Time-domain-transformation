@@ -2,11 +2,15 @@
 
 ## 图形界面
 
-在 64 位 Windows 上双击 `dist/ChirpZ-GUI.exe`，无需安装 Python。
+在 64 位 Windows 上双击 `dist/ChirpZ-GUI-CSV.exe`，无需安装 Python。
 
 1. 点击 **浏览…** 选择 CSV，也可直接输入路径。
 2. 从下拉框选择窗类型，填写起止时间。点击 **填入建议范围** 可根据当前 CSV 计算时域主峰并填入建议值，填入后仍可手动调整。
 3. 点击 **处理**，在 **处理总览** 和 **去噪对比** 标签页查看两张图。程序会自动保存到 CSV 所在目录。点击 **另存图片…** 可将两张 PNG 复制到其他目录。
+
+### 可选 CSV 导出
+
+勾选 **导出去噪 CSV** 后点击 **处理**，会额外生成 `输入文件名_denoised.csv`，包含原频点 `Freq(MHz)` 和与去噪对比图一致的处理后反射率 `ReflectRatio(dB)`。默认导出目录是 EXE 所在文件夹（从源码运行时为脚本目录），可点击 **选择目录…** 修改。已有同名 CSV 时会询问是否覆盖。
 
 ## 命令行交互模式
 
@@ -67,5 +71,6 @@ python -m venv .build-env
 
 ```powershell
 .\.build-env\Scripts\python.exe "Chirp_Z逆变换_实例.py" --gui
-.\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name ChirpZ-GUI --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
+$icon = (Resolve-Path xinchen.ico).Path
+.\.build-env\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name ChirpZ-GUI-CSV --icon $icon --add-data "${icon}:." --workpath .build\pyinstaller --specpath .build "Chirp_Z逆变换_实例.py"
 ```

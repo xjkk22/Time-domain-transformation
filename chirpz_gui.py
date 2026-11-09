@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from shutil import copy2
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -30,6 +32,10 @@ class ChirpZWindow:
         self.start = tk.StringVar(value=f"{default_range[0]:g}")
         self.stop = tk.StringVar(value=f"{default_range[1]:g}")
         self.range_info = tk.StringVar()
+        self.export_csv = tk.BooleanVar(value=False)
+        program = Path(sys.executable) if getattr(sys, "frozen", False) else Path(__file__)
+        self.default_csv_dir = program.resolve().parent
+        self.csv_dir = tk.StringVar(value=str(self.default_csv_dir))
         self.status = tk.StringVar(value="请选择 CSV 文件，然后点击处理。")
 
         controls = ttk.Frame(root, padding=(12, 12, 12, 6))
@@ -62,6 +68,18 @@ class ChirpZWindow:
         ttk.Label(controls, textvariable=self.range_info).grid(row=2, column=0, columnspan=3, sticky="w")
         self.filename.trace_add("write", lambda *_: self.range_info.set(self.limit_text))
 
+        export = ttk.Frame(controls)
+        export.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        export.columnconfigure(1, weight=1)
+        self.csv_check = ttk.Checkbutton(export, text="导出去噪 CSV", variable=self.export_csv,
+                                         command=self.update_csv_controls)
+        self.csv_check.grid(row=0, column=0, padx=(0, 8))
+        self.csv_entry = ttk.Entry(export, textvariable=self.csv_dir)
+        self.csv_entry.grid(row=0, column=1, sticky="ew")
+        self.csv_browse = ttk.Button(export, text="选择目录…", command=self.browse_csv_dir)
+        self.csv_browse.grid(row=0, column=2, padx=(8, 0))
+        self.update_csv_controls()
+
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True, padx=12, pady=(0, 6))
         self.previews = []
@@ -78,7 +96,19 @@ class ChirpZWindow:
         if filename:
             self.filename.set(filename)
 
-    def start_job(self, task, on_success, *args):
+    def update_csv_controls(self):
+        self.csv_check.state(["disabled" if self.job is not None else "!disabled"])
+        state = "!disabled" if self.export_csv.get() and self.job is None else "disabled"
+        for widget in (self.csv_entry, self.csv_browse):
+            widget.state([state])
+
+    def browse_csv_dir(self):
+        directory = filedialog.askdirectory(initialdir=self.csv_dir.get() or self.default_csv_dir,
+                                            title="选择 CSV 导出目录")
+        if directory:
+            self.csv_dir.set(directory)
+
+    def start_job(self, task, on_success, *args, **kwargs):
         filename = self.filename.get().strip().strip('"')
         if not filename:
             messagebox.showwarning("缺少数据文件", "请选择或输入 CSV 文件路径。")
@@ -87,7 +117,8 @@ class ChirpZWindow:
         for widget in (self.path_entry, self.browse_button, self.suggest_button, self.process_button):
             widget.state(["disabled"])
         self.save_button.state(["disabled"])
-        self.job = self.executor.submit(task, Path(filename).resolve(), *args)
+        self.job = self.executor.submit(task, Path(filename).resolve(), *args, **kwargs)
+        self.update_csv_controls()
         self.root.after(75, self.poll, on_success)
 
     def poll(self, on_success):
@@ -101,6 +132,7 @@ class ChirpZWindow:
             messagebox.showerror("操作失败", str(exc))
         finally:
             self.job = None
+            self.update_csv_controls()
             for widget in (self.path_entry, self.browse_button, self.suggest_button, self.process_button):
                 widget.state(["!disabled"])
             if self.paths:
@@ -122,15 +154,33 @@ class ChirpZWindow:
         except ValueError:
             messagebox.showwarning("时间范围无效", "起点和终点请输入数字，单位为 ns。")
             return
-        self.start_job(self.process_file, self.show_results, self.window_keys[self.window.get()], gate_range)
+        csv_path = None
+        filename = self.filename.get().strip().strip('"')
+        if self.export_csv.get() and filename:
+            directory = self.csv_dir.get().strip().strip('"')
+            destination = Path(directory).expanduser() if directory else self.default_csv_dir
+            if not destination.is_dir():
+                messagebox.showwarning("导出目录无效", "请选择有效的 CSV 导出目录。")
+                return
+            csv_path = destination.resolve() / f"{Path(filename).stem}_denoised.csv"
+            if csv_path.resolve() == Path(filename).resolve():
+                messagebox.showwarning("导出路径无效", "导出文件与输入 CSV 相同，请选择其他目录。")
+                return
+            if csv_path.exists() and not messagebox.askyesno("覆盖 CSV", f"是否覆盖已有文件？\n{csv_path}"):
+                return
+        self.start_job(self.process_file, partial(self.show_results, csv_path=csv_path),
+                       self.window_keys[self.window.get()], gate_range, csv_path=csv_path)
 
-    def show_results(self, paths):
+    def show_results(self, paths, *, csv_path=None):
         images = []
         for path in paths:
             with Image.open(path) as image:
                 images.append(image.copy())
         self.paths, self.images = paths, images
-        self.status.set(f"已自动保存两张 PNG 至 {paths[0].parent}")
+        if csv_path is None:
+            self.status.set(f"已自动保存两张 PNG 至 {paths[0].parent}")
+        else:
+            self.status.set(f"已保存两张 PNG，并导出 CSV 至 {csv_path}")
         self.schedule_preview()
 
     def schedule_preview(self, _event=None):
@@ -184,5 +234,6 @@ class ChirpZWindow:
 
 def launch(process_file, inspect_range, windows, default_range, time_limits):
     root = tk.Tk()
+    root.iconbitmap(default=str(Path(__file__).resolve().with_name("xinchen.ico")))
     ChirpZWindow(root, process_file, inspect_range, windows, default_range, time_limits)
     root.mainloop()
